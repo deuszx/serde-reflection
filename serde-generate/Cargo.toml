@@ -61,3 +61,8 @@ typescript = ["include_dir"]
 name = "integration_tests"
 path = "tests/lib.rs"
 harness = true
+
+[[example]]
+name = "generate_perf_library"
+path = "examples/generate_perf_library.rs"
+required-features = ["solidity"]

@@ -290,6 +290,25 @@ jobs:
       - name: Test (release) - solidity
         run: cargo test --locked --release --no-default-features --features solidity
 
+      - name: Regenerate solidity-perf Library.sol from codegen
+        run: |
+          cargo run --locked --no-default-features --features solidity \
+            --example generate_perf_library
+
+      - name: Check solidity-perf/Library.sol is up to date
+        run: |
+          if ! git diff --exit-code -- serde-generate/solidity-perf/Library.sol; then
+            echo
+            echo "::error::serde-generate/solidity-perf/Library.sol is stale."
+            echo "Run 'cargo run --features solidity --example generate_perf_library'"
+            echo "and commit the result." >&2
+            exit 1
+          fi
+
+      - name: Check solidity-perf gas snapshot
+        working-directory: serde-generate/solidity-perf
+        run: forge snapshot --check
+
   test-swift:
     runs-on: ubuntu-latest
 

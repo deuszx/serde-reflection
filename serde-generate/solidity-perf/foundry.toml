@@ -1,0 +1,25 @@
+[profile.default]
+src = "."
+out = "out"
+test = "test"
+libs = []
+
+# Pin the compiler so the committed gas snapshot is reproducible across
+# environments. Bump this together with `.gas-snapshot` when intentionally
+# upgrading. The version matches the one cached in `.github/workflows`.
+solc_version = "0.8.25"
+
+# `via_ir = true` matches the downstream `linera-bridge` setting and is the
+# pipeline under which the codegen is meant to be evaluated.
+via_ir = true
+optimizer = true
+optimizer_runs = 200
+
+# Cancun unlocks `MCOPY` for the `bytes` / `string` copy fast path. The
+# generator emits a Shanghai-compatible fallback when the user picks a lower
+# EVM version, but the snapshot in this directory always reflects the
+# Cancun-targeted output.
+evm_version = "cancun"
+
+# Keep generated artifacts out of git.
+fs_permissions = []
