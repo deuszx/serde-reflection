@@ -742,11 +742,14 @@ function bcs_serialize_{full_name}({full_name} memory input)
     pure
     returns (bytes memory)
 {{
-    if (input.has_value) {{
-        return abi.encodePacked(uint8(1), {ser_fn}(input.value));
-    }} else {{
-        return abi.encodePacked(uint8(0));
+    if (!input.has_value) {{
+        return new bytes(1);
     }}
+    bytes memory _inner = {ser_fn}(input.value);
+    bytes memory result = new bytes(1 + _inner.length);
+    result[0] = bytes1(uint8(1));
+    bcs_memcpy(result, 1, _inner);
+    return result;
 }}
 
 function bcs_deserialize_offset_{full_name}(uint256 pos, bytes memory input)
@@ -784,9 +787,17 @@ function bcs_serialize_{key_name}({code_name} memory input)
     returns (bytes memory)
 {{
     uint256 len = input.length;
-    bytes memory result = bcs_serialize_len(len);
-    for (uint256 i=0; i<len; i++) {{
-        result = abi.encodePacked(result, {inner_ser_fn}(input[i]));
+    bytes memory _len_bytes = bcs_serialize_len(len);
+    bytes[] memory _parts = new bytes[](len);
+    uint256 _total = _len_bytes.length;
+    for (uint256 i = 0; i < len; i++) {{
+        _parts[i] = {inner_ser_fn}(input[i]);
+        _total += _parts[i].length;
+    }}
+    bytes memory result = new bytes(_total);
+    uint256 _off = bcs_memcpy(result, 0, _len_bytes);
+    for (uint256 i = 0; i < len; i++) {{
+        _off = bcs_memcpy(result, _off, _parts[i]);
     }}
     return result;
 }}
@@ -830,9 +841,16 @@ function bcs_serialize_{struct_name}({struct_name} memory input)
     pure
     returns (bytes memory)
 {{
-    bytes memory result;
-    for (uint i=0; i<{size}; i++) {{
-        result = abi.encodePacked(result, {inner_ser_fn}(input.values[i]));
+    bytes[] memory _parts = new bytes[]({size});
+    uint256 _total = 0;
+    for (uint256 i = 0; i < {size}; i++) {{
+        _parts[i] = {inner_ser_fn}(input.values[i]);
+        _total += _parts[i].length;
+    }}
+    bytes memory result = new bytes(_total);
+    uint256 _off = 0;
+    for (uint256 i = 0; i < {size}; i++) {{
+        _off = bcs_memcpy(result, _off, _parts[i]);
     }}
     return result;
 }}
@@ -876,23 +894,31 @@ function bcs_serialize_{name}({name} memory input)
     returns (bytes memory)
 {{"#
                 )?;
-                for (index, named_format) in formats.iter().enumerate() {
-                    let key_name = named_format.value.key_name();
-                    let safe_name = safe_variable(&named_format.name);
+                if formats.len() == 1 {
+                    let key_name = formats[0].value.key_name();
+                    let safe_name = safe_variable(&formats[0].name);
                     let ser_fn = sol_registry.qualified_fn_name("bcs_serialize", &key_name);
-                    let block = format!("{ser_fn}(input.{safe_name})");
-                    let block = if formats.len() > 1 {
-                        if index == 0 {
-                            format!("bytes memory result = {block}")
-                        } else if index < formats.len() - 1 {
-                            format!("result = abi.encodePacked(result, {block})")
-                        } else {
-                            format!("return abi.encodePacked(result, {block})")
-                        }
-                    } else {
-                        format!("return {block}")
-                    };
-                    writeln!(out, "    {block};")?;
+                    writeln!(out, "    return {ser_fn}(input.{safe_name});")?;
+                } else {
+                    for (index, named_format) in formats.iter().enumerate() {
+                        let key_name = named_format.value.key_name();
+                        let safe_name = safe_variable(&named_format.name);
+                        let ser_fn = sol_registry.qualified_fn_name("bcs_serialize", &key_name);
+                        writeln!(
+                            out,
+                            "    bytes memory _f{index} = {ser_fn}(input.{safe_name});"
+                        )?;
+                    }
+                    let total = (0..formats.len())
+                        .map(|i| format!("_f{i}.length"))
+                        .collect::<Vec<_>>()
+                        .join(" + ");
+                    writeln!(out, "    bytes memory result = new bytes({total});")?;
+                    writeln!(out, "    uint256 _off = 0;")?;
+                    for index in 0..formats.len() {
+                        writeln!(out, "    _off = bcs_memcpy(result, _off, _f{index});")?;
+                    }
+                    writeln!(out, "    return result;")?;
                 }
                 writeln!(
                     out,
@@ -1593,6 +1619,11 @@ impl SolRegistry {
                     SolFormat::Seq(_)
                         | SolFormat::Primitive(Primitive::Str)
                         | SolFormat::Primitive(Primitive::Bytes)
+                        | SolFormat::Option(_)
+                        | SolFormat::TupleArray { .. }
+                ) || matches!(
+                    f,
+                    SolFormat::Struct { formats, .. } if formats.len() > 1
                 )
             })
         })
@@ -1744,6 +1775,34 @@ function bcs_deserialize_offset_len(uint256 pos, bytes memory input)
     }}
     require(false, "This line is unreachable");
     return (0,0);
+}}
+
+// Append `src` into `dst` starting at byte offset `dst_offset`. The caller is
+// expected to have pre-sized `dst` so that `dst_offset + src.length` fits.
+// Returns the new write offset.
+function bcs_memcpy(bytes memory dst, uint256 dst_offset, bytes memory src)
+    internal
+    pure
+    returns (uint256)
+{{
+    uint256 src_len = src.length;
+    if (src_len > 0) {{
+        assembly ("memory-safe") {{
+            let _dst := add(add(dst, 0x20), dst_offset)
+            let _src := add(src, 0x20)
+            // Word-aligned bulk copy.
+            let _full := and(src_len, not(0x1f))
+            let _i := 0
+            for {{ }} lt(_i, _full) {{ _i := add(_i, 0x20) }} {{
+                mstore(add(_dst, _i), mload(add(_src, _i)))
+            }}
+            // Tail: copy the remaining < 32 bytes one byte at a time.
+            for {{ }} lt(_i, src_len) {{ _i := add(_i, 1) }} {{
+                mstore8(add(_dst, _i), byte(0, mload(add(_src, _i))))
+            }}
+        }}
+    }}
+    return dst_offset + src_len;
 }}"#
         )?;
         Ok(())
